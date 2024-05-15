@@ -1,13 +1,15 @@
 import json
+import traceback
 import os
 import re
-import urllib
 import requests
-from pymongo import MongoClient
+from scraper import Scraper
 from dotenv import load_dotenv
 from openai import OpenAI
 from constants import Actions, PromptText
 from tqdm import tqdm
+from urllib import parse as urlparse
+from utils import clean_company_names, clean_linkedin_url, find_user_data_items, get_div_required_data_items, search_llm_extraction
 
 # Load environment variables
 load_dotenv()
@@ -15,266 +17,188 @@ load_dotenv()
 
 class LLM:
 
-    # TODO: move to env file
-    def __init__(self, api_key):
-        mongo_uri = os.getenv("MONGO_URI")
-        self.mongo_db_client = MongoClient(
-            mongo_uri)['mydatabase']['mycollection']
-        self.client = OpenAI(api_key=api_key)
-        self.apify_token = os.getenv("APIFY_API_TOKEN")
+    def __init__(self):
+        self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.perplexity_client = OpenAI(api_key=os.getenv("PPLX_API_KEY"), base_url="https://api.perplexity.ai")
         self.piloterr_api_key = os.getenv("PILOTERR_API_KEY")
         self.crunchbase_api_key = os.getenv("CRUNCHBASE_API_KEY")
+        self.scraper = Scraper()
 
     def perform_action(self, action, *args, **kwargs):
-        """Perform an action based on the given action enum."""
-        if action == Actions.SEARCH_COMPANIES:
-            return self.search_companies(*args, **kwargs)
-        elif action == Actions.SEARCH_USER_DATA_ITEMS:
-            return self.search_user_data_items(*args, **kwargs)
-        elif action == Actions.LAUNCH_SEARCH_APIS:
-            return self.launch_search_apis(*args, **kwargs)
-        elif action == Actions.EXTRACT_INFO:
-            return self.extract_info(*args, **kwargs)
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        match action:
+            case Actions.SEARCH_COMPANIES:
+                return self.search_companies(*args, **kwargs)
+            case Actions.SEARCH_USER_DATA_ITEMS:
+                return self.search_user_data_items(*args, **kwargs)
+            case Actions.LAUNCH_SEARCH_APIS:
+                return self.launch_search_apis(*args, **kwargs)
+            case Actions.EXTRACT_INFO:
+                return self.extract_info(*args, **kwargs)
+            case _:
+                raise ValueError(f"Unknown action: {action}")
+
+    def prompt(self, client, model="gpt-3.5-turbo-0125", response_format="json_object", temperature=0.1, system_prompt="", user_prompt="", max_tokens=500):
+        return client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format={"type": response_format}
+        )
 
     def search_companies(self, industry, region, size):
         """Search for companies using the given industry and region, then find LinkedIn URLs."""
 
-        prompt = f"""
-        Can you provide me with a list of 15 companies operating in the {industry} industry, located in this region {region} and
-        that have an approximate size of {size}.
-        No need to give a numbered list.
-        The company name must be short and concise.
-        Answer in json format with this format {{industry: list_of_companies}}.
-        """
-        system_prompt = "You are a professional market researcher"
-
-        # Use the LLM to get a list of companies
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ]
-
-        response = self.openai_client.chat.completions.create(
-            model="sonar-medium-online",
-            messages=messages,
-            response_format={"type": "json_object"}
-        )
+        prompt = PromptText.SEARCH_COMPANIES.value.format(industry=industry, region=region, size=size)
+        system_prompt = PromptText.SYSTEM_MARKET_RESEARCHER.value
 
         try:
-            dict_companies = json.loads(response.choices[0].message.content)
-            key = list(dict_companies.keys())[0]
-            companies_names = dict_companies[key]
+            res = self.prompt(
+                self.perplexity_client, 
+                model="sonar-medium-online", 
+                system_prompt=system_prompt, 
+                user_prompt=prompt
+            )
 
-            # Clean the company names
-            companies_names = [re.sub(r"\((.*?)\)", "", company_name).strip()
-                               for company_name in companies_names]
-            companies_names = [" ".join(word for word in company_name.split() if word.lower() not in ["uk", "plc"])
-                               for company_name in companies_names]
+            if not res.choices[0].message.content:
+                # TODO: handle error 
+                return
+
+            companies = json.loads(res.choices[0].message.content)
+            _, company_names = next(iter(companies.items()))
+            clean_company_names(company_names)
+
         except Exception as e:
+            traceback.print_exc()
             print(repr(e))
             return []
 
-        # List to hold companies information
         companies = []
-
-        # Iterate over the companies to find their LinkedIn URLs
-        for company_name in tqdm(companies_names[:10]):
+        for company_name in tqdm(company_names[:10]):
             try:
-                # Construct the Google search query
-                google_query = f"{company_name} {industry} in {region} site:www.linkedin.com/company/"
+                res = self.scraper.call(company_name, industry, region)
 
-                # Prepare the Apify Actor input
-                run_input = {
-                    # Adjusted to a list for the updated search method signature
-                    "queries": [google_query],
-                    "maxPagesPerQuery": 1,
-                    "resultsPerPage": 10,
-                    "mobileResults": False,
-                    "languageCode": "",
-                    "maxConcurrency": 10,
-                    "saveHtml": False,
-                    "saveHtmlToKeyValueStore": False,
-                    "includeUnfilteredResults": False,
-                    "customDataFunction": """async ({ input, $, request, response, html }) => {
-                        return {
-                            pageTitle: $('title').text(),
-                        };
-                    };"""
-                }
+                if not res:
+                    return
 
-                # Run the Actor and wait for it to finish
-                query_run = self.apify_client.actor(
-                    "nFJndFXA5zjCTuudP").call(run_input=run_input)
-
-                # Extract data from the search query
-                search_data = list(self.apify_client.dataset(
-                    query_run["defaultDatasetId"]).iterate_items())[0]
-
-                # Extract the first LinkedIn URL
-                url_links = [organic_res["url"]
-                             for organic_res in search_data["organicResults"] if "linkedin" in organic_res["url"]]
+                url_links = [organic_res["url"] for organic_res in res["organicResults"] if "linkedin" in organic_res["url"]]
                 linkedin_company_url = url_links[0]
+                linkedin_company_url = clean_linkedin_url(linkedin_company_url)
 
-                # Clean the LinkedIn URL
-                if linkedin_company_url.endswith("/jobs"):
-                    linkedin_company_url = linkedin_company_url.strip("/jobs")
-                linkedin_company_url = "/".join(
-                    linkedin_company_url.split("/")[:5])
-                linkedin_company_url = linkedin_company_url.partition("?")[0]
-
-                # Append company info to the list
                 companies.append({
-                    "company_name": company_name,
+                    "name": company_name,
                     "linkedin_url": linkedin_company_url
                 })
             except Exception as e:
+                traceback.print_exc()
                 print(f"Failed to process {company_name}: {repr(e)}")
 
         return companies
 
     def search_user_data_items(self, user_query):
-        system_prompt = PromptText.SYSTEM_ANALYST.value
-
-        # Step 1: User Data Items
-        user_data_items_prompt = PromptText.USER_DATA_ITEMS.value.format(
-            user_query=user_query)
-
-        user_data_response = self.client.chat.completions.create(
-            model="gpt-3.5-turbo-0125",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_data_items_prompt}
-            ],
-            max_tokens=500,
-            temperature=0.1,
-            response_format={"type": "json_object"}
+        res = self.prompt(
+            self.openai_client, 
+            system_prompt=PromptText.SYSTEM_ANALYST.value, 
+            user_prompt=PromptText.USER_DATA_ITEMS.value.format(user_query=user_query)
         )
 
-        dict_data_items = json.loads(
-            user_data_response.choices[0].message.content)
+        if not res or not res.choices[0].message.content:
+            # TODO: error handling
+            return
 
-        # Initialize the final dictionary to hold data item prompts
-        data_items_prompts = {}
+        data = json.loads(res.choices[0].message.content)
+        data_items = {}
 
-        # Step 2: Process Each Data Item
-        for idx, data_item in enumerate(dict_data_items['data_items']):
-            dict_data_item = {}
+        for idx, data_item in enumerate(data['data_items']):
+            result = {}
 
-            # Description Prompt
-            data_item_description_prompt = PromptText.DATA_ITEM_DESCRIPTION.value.format(
-                data_item=data_item)
-
-            data_item_description_response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo-0125",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": data_item_description_prompt}
-                ],
-                max_tokens=150,
+            res = self.prompt(
+                self.openai_client, 
+                system_prompt=PromptText.SYSTEM_ANALYST.value, 
+                user_prompt=PromptText.DATA_ITEM_DESCRIPTION.value.format(data_item=data_item),
                 temperature=0.7,
-                response_format={"type": "text"}
+                response_format="text",
+                max_tokens=150
             )
 
-            data_item_description = data_item_description_response.choices[0].message.content.strip(
+            if not res or not res.choices[0].message.content:
+                return
+
+            description = res.choices[0].message.content.strip()
+
+            res = self.prompt(
+                self.openai_client, 
+                system_prompt=PromptText.SYSTEM_ANALYST.value, 
+                user_prompt=PromptText.DATA_ITEM_FORMAT.value.format(data_item=data_item, data_item_description=description),
+                response_format="text",
+                max_tokens=150
             )
 
-            # Format Prompt
-            data_item_format_prompt = PromptText.DATA_ITEM_FORMAT.value.format(
-                data_item=data_item, data_item_description=data_item_description)
+            if not res or not res.choices[0].message.content:
+                return
 
-            data_item_format_response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo-0125",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": data_item_format_prompt}
-                ],
-                max_tokens=150,
-                temperature=0.1,
-                response_format={"type": "text"}
-            )
+            format = res.choices[0].message.content.strip().lower()
 
-            data_item_format = data_item_format_response.choices[0].message.content.strip(
-            ).lower()
-
-            # Information List Prompt
-            data_item_info_list_prompt = PromptText.DATA_ITEM_INFO_LIST.value.format(
-                data_item=data_item)
-
-            data_item_info_list_response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo-0125",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": data_item_info_list_prompt}
-                ],
+            res = self.prompt(
+                self.openai_client,
+                system_prompt=PromptText.SYSTEM_ANALYST.value,
+                user_prompt=PromptText.DATA_ITEM_INFO_LIST.value.format(data_item=data_item),
                 max_tokens=300,
-                temperature=0.1,
-                response_format={"type": "json_object"}
             )
 
-            data_item_info_list = json.loads(
-                data_item_info_list_response.choices[0].message.content)
+            if not res or not res.choices[0].message.content:
+                # TODO: error handling 
+                return
+
+            info_list = json.loads(res.choices[0].message.content).get("key_information", [])
 
             # Build the data item dictionary
-            dict_data_item["data_item_name"] = data_item.strip()
-            dict_data_item["data_item_description"] = data_item_description
-            dict_data_item["data_item_format"] = data_item_format
-            dict_data_item["data_item_info_list"] = data_item_info_list.get(
-                "key_information", [])
+            result["name"] = data_item.strip()
+            result["description"] = description
+            result["format"] = format
+            result["info_list"] = info_list
 
-            # Update the main dictionary with the processed data item
-            data_items_prompts[f"data_item{idx+1}"] = dict_data_item
+            data_items[f"data_item{idx+1}"] = result
 
-        return data_items_prompts
+        return data_items
 
-    def launch_search_apis(self, list_cookies, dict_company):
-        company_name = dict_company["company_name"]
-        company_name_cleaned = re.sub(r'[^ \w+]', '', company_name)
-        linkedin_company_url = dict_company["linkedin_url"]
+    def launch_search_apis(self, companies_info):
+        results = []
 
-        company_db_object = self.mongo_db_client.find_one(
-            {"_id": linkedin_company_url})
-        if not company_db_object:
-            dict1 = {k: v for k, v in dict_company.items()
-                     if "linkedin_url" not in k}
-            dict2 = {"_id": linkedin_company_url,
-                     "data_items": {}, "search_data": {}}
-            dict2.update(dict1)
-            print("Intended insert: ", dict2)
-            self.mongo_db_client.insert_one(dict2)
-            company_db_object = self.mongo_db_client.find_one(
-                {"_id": linkedin_company_url})
+        for dict_company in companies_info:
+            company_name = dict_company["company_name"]
+            company_name_cleaned = re.sub(r'[^ \w+]', '', company_name)
+            linkedin_company_url = dict_company["linkedin_url"]
 
-        dict_api_results = {}
+            dict_api_results = {}
+            dict_company_linkedin = None
 
-        # LinkedIn search
-        if "linkedin_search_results" not in company_db_object["search_data"]:
+            company_db_object = {}
+            company_db_object["search_data"] = {}
+
+            # LinkedIn search
             try:
                 linkedin_search_url = f"https://api.linkedin.com/v2/companies/{linkedin_company_url.split('/')[-1]}"
-                headers = {'Authorization': f'Bearer {self.piloterr_api_key}',
-                           'Cookie': '; '.join(list_cookies)}
+                headers = {'Authorization': f'Bearer {os.getenv("PPLX_API_KEY")}'}
                 response = requests.get(linkedin_search_url, headers=headers)
                 dict_company_linkedin = response.json()
 
                 dict_api_results["linkedin"] = dict_company_linkedin
 
-                if "error" not in dict_company_linkedin:
-                    dict_company_linkedin["source"] = linkedin_company_url
-                    self.mongo_db_client.update_one(
-                        {"_id": linkedin_company_url},
-                        {"$push": {
-                            "search_data.linkedin_search_results": dict_company_linkedin}}
-                    )
+                dict_company_linkedin["source"] = linkedin_company_url
+                company_db_object["search_data"]["linkedin_search_results"] = dict_company_linkedin
                 print("Piloterr results: ", dict_company_linkedin)
 
             except Exception as e:
                 print(repr(e))
                 dict_company_linkedin = None
 
-        # Crunchbase search
-        crunchbase_company_url = dict_company.get("crunchbase_company_url", "")
-        if "crunchbase_search_results" not in company_db_object["search_data"]:
+            # Crunchbase search
+            crunchbase_company_url = dict_company.get("crunchbase_company_url", "")
+
             if not crunchbase_company_url and dict_company_linkedin:
                 try:
                     crunchbase_company_url = dict_company_linkedin.get(
@@ -287,7 +211,7 @@ class LLM:
                 crunchbase_url = "https://api.crunchbase.com/api/v4/autocompletes"
                 params = {
                     'user_key': self.crunchbase_api_key,
-                    'query': urllib.parse.quote_plus(company_name_cleaned),
+                    'query': urlparse.quote_plus(company_name_cleaned),
                     'collection_ids': 'organization.companies'
                 }
                 response = requests.get(crunchbase_url, params=params)
@@ -315,123 +239,50 @@ class LLM:
                     if response.status_code == 200:
                         crunchbase_data = response.json()
                         dict_api_results["crunchbase"] = crunchbase_data
-                        self.mongo_db_client.update_one(
-                            {"_id": linkedin_company_url},
-                            {"$push": {
-                                "search_data.crunchbase_search_results": crunchbase_data}}
-                        )
+                        company_db_object["search_data"]["crunchbase_search_results"] = crunchbase_data
                         print("Crunchbase data found: ", crunchbase_data)
                 except Exception as e:
                     print(repr(e))
 
-        return dict_api_results
+            results.append(dict_api_results)
+
+        return results
 
     def extract_info(self, data_items_prompts, list_companies):
-        def chatgpt_api_prompt(response_format_type="json_object", temperature=0.1, system_prompt="", user_prompt=""):
-            messages = [{"role": "system", "content": system_prompt}, {
-                "role": "user", "content": user_prompt}]
-            return self.client.chat.completions.create(
-                model="gpt-3.5-turbo-0125",
-                messages=messages,
-                max_tokens=500,
-                temperature=temperature,
-                response_format={"type": response_format_type}
-            )
-
-        def find_user_data_items(data_item, data):
-            system_prompt = PromptText.SYSTEM_HELPFUL_BOT.value
-            user_prompt = f"""
-            I am giving you data about a company: {data}.
-            I want you to find the following piece of information: {data_item}.
-            If no information was found in the given information please answer with 'None' and nothing more.
-            If you found the information ONLY return the information as is, nothing more.
-            """
-            response = chatgpt_api_prompt(
-                "text", 0.7, system_prompt, user_prompt)
-            return response.choices[0].message.content.strip()
-
-        def get_div_required_data_items(data_items_prompts):
-            div_required_data_items = {}
-            for data_item, data_item_dict in data_items_prompts.items():
-                system_prompt = PromptText.SYSTEM_NEEDED_PROCESS.value
-                sources = {
-                    "linkedin_search_results": "Contains information of a company in LinkedIn. So we can extract a description and very basic general information like the name and location.",
-                    "crunchbase_search_results": "Contains information of a company in Crunchbase, it's mainly useful for searching financial information on a company like investment rounds",
-                    "cp_house_search_results": "Contains information of a company in Companies House, it's only useful for searching: Company Name, Registered Office Address, Company Type, Directors and People with Significant Control, Annual accounts",
-                }
-                user_prompt = f"""
-                Here is the search term you should act on: {data_item_dict["data_item_name"]},
-                You are expected to find the right data sources from this list:
-                {json.dumps(sources, indent=4)}
-                Please answer in json in the following format:
-                {{kept_data_sources: []}}
-                where the contents of kept_data_sources list the keys of the data sources provided
-                """
-                response = chatgpt_api_prompt(
-                    "json_object", 0.1, system_prompt, user_prompt)
-                div_required_data_items[data_item_dict["data_item_name"]] = json.loads(
-                    response.choices[0].message.content).get('kept_data_sources', list(sources.keys()))
-            return div_required_data_items
-
-        def search_llm_extraction(data_item, company_name):
-            system_prompt = PromptText.SYSTEM_MARKET_RESEARCHER.value
-            user_prompt = f"""
-            Can you provide me the {data_item} of this company: {company_name}?
-            The answer should be short and concise, it should only answer with the requested data:
-            Don't form phrases, only give the number or a single word to answer the question
-            If no data was found answer with None
-            """
-            response = chatgpt_api_prompt(
-                "json_object", 0.1, system_prompt, user_prompt)
-            return response.choices[0].message.content
-
         list_answers = []
         for company in list_companies:
             dict_company_answers = {"company": company["company_name"]}
-            db_company_item = self.mongo_db_client.find_one(
-                {"_id": company["linkedin_url"]})
-
-            if not db_company_item:
-                print(
-                    f"Couldn't find company in db {company['linkedin_url']} MAJOR ERROR shouldn't happen")
-                continue
 
             # Load data
-            dict_company_data = {k: v for k,
-                                 v in db_company_item["search_data"].items()}
+            dict_company_data = {k: v for k, v in db_company_item["search_data"].items()}
 
-            div_required_data_items = get_div_required_data_items(
-                data_items_prompts)
+            system_prompt_needed_process = PromptText.SYSTEM_NEEDED_PROCESS.value
+            system_prompt_helpful_bot = PromptText.SYSTEM_HELPFUL_BOT.value
+            system_prompt_market_researcher = PromptText.SYSTEM_MARKET_RESEARCHER.value
+            
+            div_required_data_items = get_div_required_data_items(self.openai_client, data_items_prompts, system_prompt_needed_process)
 
             for data_item, data_item_dict in data_items_prompts.items():
                 key = data_item_dict["data_item_name"]
                 if "data_items" in db_company_item and key in db_company_item["data_items"]:
                     dict_company_answers[key] = db_company_item["data_items"][key][0]['content']
                 else:
-                    final_dict_company_data = [
-                        dict_company_data[k] for k in div_required_data_items[key] if k in dict_company_data]
+                    final_dict_company_data = [dict_company_data[k] for k in div_required_data_items[key] if k in dict_company_data]
                     final_answer = []
                     for item in final_dict_company_data:
-                        final_answer_temp = find_user_data_items(key, item)
+                        final_answer_temp = find_user_data_items(self.openai_client, key, item, system_prompt_helpful_bot)
                         if final_answer_temp.lower() != "none":
-                            final_answer.append(
-                                {"content": final_answer_temp, "source": item.get("source", "")})
+                            final_answer.append({"content": final_answer_temp, "source": item.get("source", "")})
                     if not final_answer:
                         try:
-                            llm_answer = search_llm_extraction(
-                                key, company["company_name"])
-                            final_answer.append(
-                                {"content": llm_answer, "source": "Google search"})
+                            llm_answer = search_llm_extraction(self.openai_client, key, company["company_name"], system_prompt_market_researcher)
+                            final_answer.append({"content": llm_answer, "source": "Google search"})
                         except KeyError:
                             pass
                     if final_answer:
                         dict_company_answers[key] = final_answer[0]['content']
-                        mongo_db_client.update_one({"_id": company["linkedin_url"]}, {
-                                                   "$set": {f"data_items.{key}": final_answer}})
                     else:
                         dict_company_answers[key] = None
-                        mongo_db_client.update_one({"_id": company["linkedin_url"]}, {
-                                                   "$set": {f"data_items.{key}": None}})
 
             list_answers.append(dict_company_answers)
 

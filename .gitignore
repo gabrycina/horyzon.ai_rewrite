@@ -1,3 +1,6 @@
-.venv
+venv
+.DS_Store
+.idea
+.vs_code
 .env
-__pycache__
+/__pycache__/
