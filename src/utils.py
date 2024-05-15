@@ -1,26 +1,4 @@
 import json
-import re
-
-def clean_company_names(companies_names):
-    parentheses_pattern = re.compile(r"\((.*?)\)", re.IGNORECASE)
-    unwanted_words = {"uk", "plc"}
-
-    def clean_name(name):
-        name = re.sub(parentheses_pattern, "", name).strip()
-        name = " ".join(word for word in name.split() if word.lower() not in unwanted_words)
-        return name
-
-    return [clean_name(company_name) for company_name in companies_names]
-
-
-def clean_linkedin_url(url):
-    if url.endswith("/jobs"):
-        url = url[:-5]
-
-    url = "/".join(url.split("/")[:5])
-    url = url.partition("?")[0]
-
-    return url
 
 def find_user_data_items(client, data_item, data, system_prompt):
     user_prompt = f"""

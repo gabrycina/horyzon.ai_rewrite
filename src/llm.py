@@ -1,7 +1,6 @@
 import json
 import traceback
 import os
-import re
 import requests
 from scraper import Scraper
 from dotenv import load_dotenv
@@ -9,7 +8,9 @@ from openai import OpenAI
 from constants import Actions, PromptText
 from tqdm import tqdm
 from urllib import parse as urlparse
-from utils import clean_company_names, clean_linkedin_url, find_user_data_items, get_div_required_data_items, search_llm_extraction
+from utils import find_user_data_items, get_div_required_data_items, search_llm_extraction
+from linkedin import clean_linkedin_url, clean_company_names, search_linkedin
+from crunchbase import search_crunchbase
 
 # Load environment variables
 load_dotenv()
@@ -168,83 +169,16 @@ class LLM:
     def launch_search_apis(self, companies_info):
         results = []
 
-        for dict_company in companies_info:
-            company_name = dict_company["company_name"]
-            company_name_cleaned = re.sub(r'[^ \w+]', '', company_name)
-            linkedin_company_url = dict_company["linkedin_url"]
+        for company in companies_info:
+            api_results = {}
 
-            dict_api_results = {}
-            dict_company_linkedin = None
+            company_linkedin = search_linkedin(company)
+            api_results["linkedin"] =  company_linkedin
 
-            company_db_object = {}
-            company_db_object["search_data"] = {}
+            company_crunchbase = search_crunchbase(company)
+            api_results["crunchbase"] =  company_crunchbase
 
-            # LinkedIn search
-            try:
-                linkedin_search_url = f"https://api.linkedin.com/v2/companies/{linkedin_company_url.split('/')[-1]}"
-                headers = {'Authorization': f'Bearer {os.getenv("PPLX_API_KEY")}'}
-                response = requests.get(linkedin_search_url, headers=headers)
-                dict_company_linkedin = response.json()
-
-                dict_api_results["linkedin"] = dict_company_linkedin
-
-                dict_company_linkedin["source"] = linkedin_company_url
-                company_db_object["search_data"]["linkedin_search_results"] = dict_company_linkedin
-                print("Piloterr results: ", dict_company_linkedin)
-
-            except Exception as e:
-                print(repr(e))
-                dict_company_linkedin = None
-
-            # Crunchbase search
-            crunchbase_company_url = dict_company.get("crunchbase_company_url", "")
-
-            if not crunchbase_company_url and dict_company_linkedin:
-                try:
-                    crunchbase_company_url = dict_company_linkedin.get(
-                        "crunchbaseFundingData", {}).get("organizationUrl", "")
-                except Exception as e:
-                    print(repr(e))
-                    print("Crunchbase data not found in LinkedIn company dictionary")
-
-            if not crunchbase_company_url:
-                crunchbase_url = "https://api.crunchbase.com/api/v4/autocompletes"
-                params = {
-                    'user_key': self.crunchbase_api_key,
-                    'query': urlparse.quote_plus(company_name_cleaned),
-                    'collection_ids': 'organization.companies'
-                }
-                response = requests.get(crunchbase_url, params=params)
-                if response.status_code == 200:
-                    companies = response.json()["entities"]
-                    for company in companies:
-                        permalink = company["identifier"]["permalink"]
-                        if linkedin_company_url:
-                            linkedin_check_url = f"https://api.crunchbase.com/api/v4/entities/organizations/{permalink}?field_ids=linkedin"
-                            response2 = requests.get(linkedin_check_url)
-                            if response2.status_code == 200:
-                                json_response = response2.json()
-                                if json_response["properties"].get("linkedin", {}).get("value") == linkedin_company_url:
-                                    crunchbase_company_url = permalink
-                                    break
-                        else:
-                            crunchbase_company_url = permalink
-                            break
-                print("Crunchbase permalink found: ", crunchbase_company_url)
-
-            if crunchbase_company_url:
-                crunchbase_search_url = f"https://api.crunchbase.com/api/v4/entities/organizations/{crunchbase_company_url}?user_key={self.crunchbase_api_key}"
-                try:
-                    response = requests.get(crunchbase_search_url)
-                    if response.status_code == 200:
-                        crunchbase_data = response.json()
-                        dict_api_results["crunchbase"] = crunchbase_data
-                        company_db_object["search_data"]["crunchbase_search_results"] = crunchbase_data
-                        print("Crunchbase data found: ", crunchbase_data)
-                except Exception as e:
-                    print(repr(e))
-
-            results.append(dict_api_results)
+            results.append(api_results)
 
         return results
 
