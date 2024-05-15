@@ -6,7 +6,6 @@ class Actions(Enum):
     LAUNCH_SEARCH_APIS = auto(), 
     EXTRACT_INFO = auto()
 
-
 class PromptText(Enum):
     SEARCH_COMPANIES = """
         Can you provide me with a list of 15 companies operating in the {industry} industry, located in this region {region} and
@@ -63,6 +62,23 @@ class PromptText(Enum):
          Key information: name, position
     """
 
+    DATA_SOURCE_PROMPT = """Here is the search term you should act on: {data_item_name},
+        You are expected to find the right data sources from this list:
+        {sources}
+        Please answer in json in the following format:
+        {{kept_data_sources: []}}
+        where the contents of kept_data_sources list the keys of the data sources provided"""
+
+    FIND_USER_DATA_ITEMS_PROMPT = """I am giving you data about a company: {data}.
+        I want you to find the following piece of information: {data_item}.
+        If no information was found in the given information please answer with 'None' and nothing more.
+        If you found the information ONLY return the information as is, nothing more."""
+
+    SEARCH_LLM_EXTRACTION_PROMPT = """Can you provide me the {data_item} of this company: {company_name}?
+        The answer should be short and concise, it should only answer with the requested data:
+        Don't form phrases, only give the number or a single word to answer the question
+        If no data was found answer with None"""
+
     SYSTEM_ANALYST = "You are a professional analyst"
 
     SYSTEM_HELPFUL_BOT = "You are a helpful bot tasked with extracting information from a given text. If the requested information isn't available return 'None'"
@@ -70,3 +86,9 @@ class PromptText(Enum):
     SYSTEM_NEEDED_PROCESS = "You are a necessary process in an internal search tool. You are expected to be able to determine the necessary data sources for a specific search term regarding a company search. You may also not find any data sources."
 
     SYSTEM_MARKET_RESEARCHER = "You are a professional market researcher"
+
+class Constants(Enum):
+    SOURCES = {
+        "linkedin_search_results": "Contains information of a company in LinkedIn. So we can extract a description and very basic general information like the name and location.",
+        "crunchbase_search_results": "Contains information of a company in Crunchbase, it's mainly useful for searching financial information on a company like investment rounds",
+    }

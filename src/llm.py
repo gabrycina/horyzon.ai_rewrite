@@ -1,14 +1,11 @@
 import json
 import traceback
 import os
-import requests
 from scraper import Scraper
 from dotenv import load_dotenv
 from openai import OpenAI
-from constants import Actions, PromptText
+from constants import Actions, Constants, PromptText
 from tqdm import tqdm
-from urllib import parse as urlparse
-from utils import find_user_data_items, get_div_required_data_items, search_llm_extraction
 from linkedin import clean_linkedin_url, clean_company_names, search_linkedin
 from crunchbase import search_crunchbase
 
@@ -83,6 +80,7 @@ class LLM:
                 res = self.scraper.call(company_name, industry, region)
 
                 if not res:
+                    # TODO: error handling
                     return
 
                 url_links = [organic_res["url"] for organic_res in res["organicResults"] if "linkedin" in organic_res["url"]]
@@ -126,6 +124,7 @@ class LLM:
             )
 
             if not res or not res.choices[0].message.content:
+                # TODO: error handling 
                 return
 
             description = res.choices[0].message.content.strip()
@@ -139,6 +138,7 @@ class LLM:
             )
 
             if not res or not res.choices[0].message.content:
+                # TODO: error handling 
                 return
 
             format = res.choices[0].message.content.strip().lower()
@@ -171,53 +171,83 @@ class LLM:
 
         for company in companies_info:
             api_results = {}
+            api_results[company["name"]] = {}
 
             company_linkedin = search_linkedin(company)
-            api_results["linkedin"] =  company_linkedin
+            api_results[company["name"]]["linkedin"] =  company_linkedin
 
             company_crunchbase = search_crunchbase(company)
-            api_results["crunchbase"] =  company_crunchbase
-
+            api_results[company["name"]]["crunchbase"] =  company_crunchbase
+            
             results.append(api_results)
 
         return results
 
-    def extract_info(self, data_items_prompts, list_companies):
-        list_answers = []
-        for company in list_companies:
-            dict_company_answers = {"company": company["company_name"]}
+    def extract_info(self, data_items, companies, search_results):
+        results = []
 
-            # Load data
-            dict_company_data = {k: v for k, v in db_company_item["search_data"].items()}
+        for company in companies:
+            company_results = {"company": company["name"]}
+            required_data_items = {}
 
-            system_prompt_needed_process = PromptText.SYSTEM_NEEDED_PROCESS.value
-            system_prompt_helpful_bot = PromptText.SYSTEM_HELPFUL_BOT.value
-            system_prompt_market_researcher = PromptText.SYSTEM_MARKET_RESEARCHER.value
-            
-            div_required_data_items = get_div_required_data_items(self.openai_client, data_items_prompts, system_prompt_needed_process)
+            for _, data_item in data_items.items():
+                res = self.prompt(
+                    self.openai_client,
+                    system_prompt=PromptText.SYSTEM_NEEDED_PROCESS.value, 
+                    user_prompt=PromptText.DATA_SOURCE_PROMPT.value.format(
+                        data_item_name=data_item["name"],
+                        sources=json.dumps(Constants.SOURCES, indent=4)
+                    )
+                )
 
-            for data_item, data_item_dict in data_items_prompts.items():
-                key = data_item_dict["data_item_name"]
-                if "data_items" in db_company_item and key in db_company_item["data_items"]:
-                    dict_company_answers[key] = db_company_item["data_items"][key][0]['content']
-                else:
-                    final_dict_company_data = [dict_company_data[k] for k in div_required_data_items[key] if k in dict_company_data]
-                    final_answer = []
-                    for item in final_dict_company_data:
-                        final_answer_temp = find_user_data_items(self.openai_client, key, item, system_prompt_helpful_bot)
-                        if final_answer_temp.lower() != "none":
-                            final_answer.append({"content": final_answer_temp, "source": item.get("source", "")})
-                    if not final_answer:
-                        try:
-                            llm_answer = search_llm_extraction(self.openai_client, key, company["company_name"], system_prompt_market_researcher)
-                            final_answer.append({"content": llm_answer, "source": "Google search"})
-                        except KeyError:
-                            pass
-                    if final_answer:
-                        dict_company_answers[key] = final_answer[0]['content']
-                    else:
-                        dict_company_answers[key] = None
+                if not res or not res.choices[0].message.content: 
+                # TODO: error handling 
+                    return 
 
-            list_answers.append(dict_company_answers)
+                required_data_items[data_item["name"]] = json.loads(res.choices[0].message.content).get('kept_data_sources')
 
-        return list_answers
+            filtered_data_items = []
+            for key, data_sources in required_data_items.items():
+                filtered_data_items.extend([search_results[company["name"]][k] for k in data_sources if k in search_results[company["name"]]])
+
+            answers = []
+            for data_item in filtered_data_items:
+                res = self.prompt(
+                    self.openai_client,
+                    temperature=0.7, 
+                    system_prompt=PromptText.SYSTEM_HELPFUL_BOT.value, 
+                    user_prompt=PromptText.FIND_USER_DATA_ITEMS_PROMPT.value.format(
+                        data=data_item, 
+                        data_item=company["name"]
+                    )
+                )
+
+                if not res or not res.choices[0].message.content:
+                    continue
+
+                data = res.choices[0].message.content.strip()
+                if data.lower() != "none":
+                    answers.append({"content": data, "source": data_item.get("source", "")})
+
+            if not answers:
+                for key in required_data_items.keys():
+                    res = self.prompt(
+                        self.openai_client,
+                        system_prompt=PromptText.SYSTEM_MARKET_RESEARCHER.value,
+                        user_prompt=PromptText.SEARCH_LLM_EXTRACTION_PROMPT.value.format(data_item=key, company_name=company["name"])
+                    )
+
+                    if not res or not res.choices[0].message.content:
+                        return
+
+                    answers.append({"content": res.choices[0].message.content, "source": "Google search"})
+
+            for key in required_data_items.keys():
+                company_results[key] = answers[0]['content'] if answers else None
+
+            results.append(company_results)
+
+        return results
+
+
+
