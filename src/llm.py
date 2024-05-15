@@ -167,7 +167,7 @@ class LLM:
         return data_items
 
     def launch_search_apis(self, companies_info):
-        results = []
+        results = {}
 
         for company in companies_info:
             results[company["name"]] = {}
