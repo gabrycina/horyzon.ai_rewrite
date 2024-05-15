@@ -170,16 +170,13 @@ class LLM:
         results = []
 
         for company in companies_info:
-            api_results = {}
-            api_results[company["name"]] = {}
+            results[company["name"]] = {}
 
             company_linkedin = search_linkedin(company)
-            api_results[company["name"]]["linkedin"] =  company_linkedin
+            results[company["name"]]["linkedin"] =  company_linkedin
 
             company_crunchbase = search_crunchbase(company)
-            api_results[company["name"]]["crunchbase"] =  company_crunchbase
-            
-            results.append(api_results)
+            results[company["name"]]["crunchbase"] =  company_crunchbase
 
         return results
 
