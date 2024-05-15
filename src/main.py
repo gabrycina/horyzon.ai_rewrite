@@ -15,7 +15,7 @@ def main(query, industry, region, size):
     results = llm.perform_action(Actions.LAUNCH_SEARCH_APIS, companies_info)
     print(json.dumps(results, indent=4))
 
-    results = llm.perform_action(Actions.EXTRACT_INFO, data_items, companies_info)
+    results = llm.perform_action(Actions.EXTRACT_INFO, data_items, companies_info, results)
     print(json.dumps(results, indent=4))
 
 

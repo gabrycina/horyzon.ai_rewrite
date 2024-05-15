@@ -4,7 +4,7 @@ import os
 from scraper import Scraper
 from dotenv import load_dotenv
 from openai import OpenAI
-from constants import Actions, Constants, PromptText
+from constants import Actions, PromptText, SOURCES
 from tqdm import tqdm
 from linkedin import clean_linkedin_url, clean_company_names, search_linkedin
 from crunchbase import search_crunchbase
@@ -196,7 +196,7 @@ class LLM:
                     system_prompt=PromptText.SYSTEM_NEEDED_PROCESS.value, 
                     user_prompt=PromptText.DATA_SOURCE_PROMPT.value.format(
                         data_item_name=data_item["name"],
-                        sources=json.dumps(Constants.SOURCES, indent=4)
+                        sources=json.dumps(SOURCES, indent=4)
                     )
                 )
 

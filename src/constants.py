@@ -87,8 +87,10 @@ class PromptText(Enum):
 
     SYSTEM_MARKET_RESEARCHER = "You are a professional market researcher"
 
-class Constants(Enum):
-    SOURCES = {
-        "linkedin_search_results": "Contains information of a company in LinkedIn. So we can extract a description and very basic general information like the name and location.",
-        "crunchbase_search_results": "Contains information of a company in Crunchbase, it's mainly useful for searching financial information on a company like investment rounds",
-    }
+
+# CONSTANTS
+
+SOURCES = {
+    "linkedin_search_results": "Contains information of a company in LinkedIn. So we can extract a description and very basic general information like the name and location.",
+    "crunchbase_search_results": "Contains information of a company in Crunchbase, it's mainly useful for searching financial information on a company like investment rounds",
+}

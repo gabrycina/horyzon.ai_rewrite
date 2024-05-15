@@ -4,3 +4,4 @@ venv
 .vs_code
 .env
 /__pycache__/
+/src/__pycache__/
