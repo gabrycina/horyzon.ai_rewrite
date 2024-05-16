@@ -19,5 +19,9 @@ def main(query, industry, region, size):
     print(json.dumps(results, indent=4))
 
 
-main("Companies realising revolutionary AI products born in the last 7 years",
-     industry="technology", region="California", size="medium-sized")
+main(
+    "Companies realising revolutionary AI products born in the last 7 years",
+    industry="technology", 
+    region="California", 
+    size="medium-sized"
+)
